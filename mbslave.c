@@ -3,11 +3,17 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
-  #include <arpa/inet.h>
-#else
+
+#ifdef _WIN32
   #include <Ws2tcpip.h>
   /*#include <winsock2.h>*/
+#else
+  #include <arpa/inet.h>
+#endif
+
+#if defined (__FreeBSD__) || defined (__OpenBSD__)
+  #include <sys/socket.h>
+  #include <netinet/in.h>
 #endif
 
 #include <modbus/modbus.h>
@@ -39,9 +45,9 @@ int main(int argc, char **argv)
   char ip_addr[16] = { '\0' };
 
   if (argc == 2) {
-    strncpy(ip_addr, argv[1], 15);// = argv[1];//"192.168.155.197";
+    strncpy(ip_addr, argv[1], 15);
   } else if (argc == 1) {
-    strncpy(ip_addr, "127.0.0.1", 9);
+    strncpy(ip_addr, "0.0.0.0", 9);
   }
 
   if (!is_valid_ip(ip_addr)) {
@@ -49,7 +55,7 @@ int main(int argc, char **argv)
     exit(EXIT_FAILURE);
   }
 
-  mb_mapping = modbus_mapping_new(0, 0, 20000, 0);
+  mb_mapping = modbus_mapping_new(0, 0, 10000, 0);
   if (!mb_mapping) {
     fprintf(stderr, "Failed to allocate the modbus map: %s\n",
             modbus_strerror(errno));
@@ -57,8 +63,8 @@ int main(int argc, char **argv)
   }
 
   /* set some default values */
-  for (i = 0; i < 10; i++) {
-    mb_mapping->tab_registers[i] = (uint16_t)i;
+  for (i = 0; i < 10000; i++) {
+    mb_mapping->tab_registers[i] = (uint16_t)i % 1000;
   }
 
   ctx = modbus_new_tcp(ip_addr, port);
@@ -66,34 +72,40 @@ int main(int argc, char **argv)
     fprintf(stderr, "Unable to allocate libmodbus context.\n");
     exit(EXIT_FAILURE);
   }
-  modbus_set_debug(ctx, 1);
+  /* modbus_set_debug(ctx, 1); */
 
   s = modbus_tcp_listen(ctx, 5);
 
+  printf("Listening on %s:%d...\n", ip_addr, port);
   while (1) {
-    printf("listening on %s:%d...\n", ip_addr, port);
-    modbus_tcp_accept(ctx, &s);
-    puts("accepted");
+    modbus_set_debug(ctx, 1);
+    if (modbus_tcp_accept(ctx, &s) == -1) {
+      printf("errno: %s\n", modbus_strerror(errno));
+      if (port < 1024 && getuid() > 0) {
+        puts("HINT: Using a port below 1024 requires elevated privileges.");
+      }
+      puts("Retrying in 1 second... Ctrl + C to abort");
+      sleep(1);
+      continue;
+    }
+    modbus_set_debug(ctx, 0);
 
     do {
       req_len = modbus_receive(ctx, req);
 
-      printf("req_len: %d\n", req_len);
-
       if (req_len > 0) {
-        printf("rx: ");
+        printf("rx:");
         for (i = 0; i < req_len; i++) {
-          if (i > 0 && i % 2 == 0) {
-            printf(" ");
-          }
-          printf("%.2x", req[i]);
+          printf("%s%.2x", i > 0 && i % 2 ? "" : " ", req[i]);
         }
-        printf("\n\n");
+        puts("\n");
         reply_len = modbus_reply(ctx, req, req_len, mb_mapping);
       }
-    } while (req_len > 0); 
+    } while (req_len > 0);
 
-    printf("errno: %s\n", modbus_strerror(errno));
+    if (errno != ECONNRESET) {
+      printf("errno: %s\n", modbus_strerror(errno));
+    }
   }
 
   if (s != -1) {
